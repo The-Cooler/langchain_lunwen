@@ -41,6 +41,26 @@ _FORMAT_SPEC_MAP = {
 _PARENS_SPLIT_RE = re.compile(r"[（(]")
 _WHITESPACE_RE = re.compile(r"\s+")
 _NUM_HEADING_RE = re.compile(r"^\s*-\s*(\d+\.\d+(?:\.\d+)?)\s+(.+?)\s*$")
+_NUM_PREFIX_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)\s+")
+
+
+def _looks_placeholder_title(s: str) -> bool:
+    """过滤章节规范中的占位标题，避免被当成必须写入的真实标题。"""
+    t = (s or "").strip().lower()
+    if not t:
+        return True
+    bad_tokens = (
+        "模块1",
+        "模块2",
+        "功能一",
+        "同上",
+        "...",
+        "xxxxx",
+        "xxxx",
+        "xxx",
+        "xx功能实现",
+    )
+    return any(k in t for k in bad_tokens)
 
 
 def _normalize_title_for_compare(s: str) -> str:
@@ -82,6 +102,8 @@ def _get_expected_section_order_cached(profile_name: str) -> tuple[list[str], di
     def _push(raw_title: str) -> None:
         raw_title = (raw_title or "").strip()
         if not raw_title:
+            return
+        if _looks_placeholder_title(raw_title):
             return
         n = _normalize_title_for_compare(raw_title)
         if not n:
@@ -166,6 +188,9 @@ class ThesisContext:
         self.vectorstore = vectorstore
         self.word_builder = None
         self.validated_ok = False
+        # RAG 检索缓存/去重：避免 agent 频繁重复检索同一 query
+        self._last_rag_query_norm: str | None = None
+        self._last_rag_result: str | None = None
 
 
 def create_thesis_tools(ctx: ThesisContext) -> list:
@@ -176,13 +201,24 @@ def create_thesis_tools(ctx: ThesisContext) -> list:
     @tool
     def search_materials(query: str) -> str:
         """根据关键词或问题搜索素材库中的相关内容。撰写每一章节前应先搜索相关素材，确保内容有据可依。参数 query: 搜索关键词或问题描述。"""
-        docs = ctx.vectorstore.similarity_search(query, k=8)
+        q = (query or "").strip()
+        q_norm = _WHITESPACE_RE.sub(" ", q).lower()
+        if ctx._last_rag_query_norm and q_norm == ctx._last_rag_query_norm and ctx._last_rag_result:
+            return (
+                "（已命中上一次相同检索词，未再次检索向量库；请优先复用以下片段写作。）\n\n"
+                + ctx._last_rag_result
+            )
+
+        docs = ctx.vectorstore.similarity_search(q, k=8)
         if not docs:
             return "未找到相关素材。"
         parts = []
         for i, doc in enumerate(docs, 1):
             parts.append(f"【片段 {i}】\n{doc.page_content}")
-        return "\n\n---\n\n".join(parts)
+        out = "\n\n---\n\n".join(parts)
+        ctx._last_rag_query_norm = q_norm
+        ctx._last_rag_result = out
+        return out
 
     @tool
     def read_format_spec(category: str) -> str:
@@ -223,6 +259,19 @@ def create_thesis_tools(ctx: ThesisContext) -> list:
         written_norm = {_normalize_title_for_compare(t) for t in written_sections if t}
         if st in written_sections or (st_norm and st_norm in written_norm):
             return f"该节已写入：「{st}」。请按模板写下一节，勿重复。"
+
+        # 同编号槽位去重：例如已写“4.1 用户管理模块”后，拒绝“4.1 模块1”这类变体重写
+        m_st = _NUM_PREFIX_RE.match(st_norm or "")
+        st_prefix = m_st.group(1) if m_st else None
+        if st_prefix:
+            for wt in written_sections:
+                wt_norm = _normalize_title_for_compare(wt)
+                m_wt = _NUM_PREFIX_RE.match(wt_norm)
+                if m_wt and m_wt.group(1) == st_prefix:
+                    return (
+                        f"该编号小节已写入（{st_prefix}）。"
+                        f"已存在标题：「{wt}」，拒绝重复或改名重写「{st}」。"
+                    )
 
         # 写入顺序断言：不得跳过 expected 标题序列中尚未写入的内容
         if st_norm in expected_idx_map:
@@ -277,12 +326,28 @@ def create_thesis_tools(ctx: ThesisContext) -> list:
     @tool
     def write_figure_caption_to_docx(caption: str) -> str:
         """写入图片题注，如「图3-1 系统架构图」。用于图题场景，避免走正文工具导致样式错误。"""
+        cap = (caption or "").strip()
+        if not cap:
+            return "未写入：caption 为空。"
+
+        progress_path = get_progress_path(ctx.docx_path)
+        written_caps: set[str] = set()
+        if progress_path.exists():
+            for ln in progress_path.read_text(encoding="utf-8").splitlines():
+                s = ln.strip()
+                if not s or "\t" not in s:
+                    continue
+                kind, title = s.split("\t", 1)
+                if kind == "figure_caption":
+                    written_caps.add(title.strip())
+        if cap in written_caps:
+            return f"该图题已写入：「{cap}」。请写下一节或下一图题，勿重复。"
+
         ctx.word_builder, ctx.docx_path = ensure_word_builder(
             ctx.word_builder, ctx.docx_path, ctx.existing_docx_text
         )
-        progress_path = get_progress_path(ctx.docx_path)
         return write_figure_caption_into_docx(
-            ctx.word_builder, ctx.docx_path, caption, progress_path=progress_path
+            ctx.word_builder, ctx.docx_path, cap, progress_path=progress_path
         )
 
     @tool

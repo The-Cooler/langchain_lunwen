@@ -13,6 +13,7 @@
 """
 import argparse
 import re
+import shutil
 from pathlib import Path
 
 from core.context import (
@@ -87,6 +88,39 @@ def run_agent_stream(agent, user_message: str, config: dict) -> str:
     return ""
 
 
+def _format_plan_block(
+    *,
+    round_idx: int,
+    max_rounds: int,
+    last_written: str | None,
+    missing_titles: list[str],
+    plan_steps,
+) -> str:
+    """格式化可读的本轮计划块（便于终端查看与落盘）。"""
+    target = plan_steps[0].title if plan_steps else "（无）"
+    lines = [
+        "",
+        "=" * 62,
+        f"[PLAN] Round {round_idx}/{max_rounds}",
+        f"[PLAN] LastWritten: {last_written or '（无）'}",
+        f"[PLAN] MissingTotal: {len(missing_titles)}",
+        f"[PLAN] NextTarget: {target}",
+        "[PLAN] Steps:",
+    ]
+    if plan_steps:
+        for i, s in enumerate(plan_steps, 1):
+            lines.append(f"  {i}. {s.title}")
+            lines.append(f"     - 原因: {s.reason}")
+    else:
+        lines.append("  1. （无可执行步骤）")
+    lines.append("[PLAN] Constraints:")
+    lines.append("  - 本轮只允许写入 NextTarget")
+    lines.append("  - 不得写入更后面的标题")
+    lines.append("  - 如信息不足，再补充一次检索")
+    lines.append("=" * 62)
+    return "\n".join(lines)
+
+
 def select_profile_interactive() -> str:
     """交互式选择论文模板包。"""
     profiles = list_config_profiles()
@@ -150,12 +184,15 @@ def run_step1(user: str) -> bool:
     return True
 
 
-def run_step2(user: str, *, stream: bool = True) -> None:
+def run_step2(user: str, *, stream: bool = True, auto_repair: bool = True) -> None:
     """第二步：RAG 存储素材 + LangChain Agent 生成论文。"""
     from core.agent import build_agent
     from tools.thesis_tools import get_written_set
     from tools.thesis_tools import get_progress_path
     from tools.langchain_tools import get_expected_section_order
+    from tools.langchain_tools import _normalize_title_for_compare as normalize_title_for_compare
+    from tools.word_tools import truncate_docx_from_heading, truncate_progress_from_section
+    from core.plan_agent import PlanAgent
 
     materials_full = read_all_materials_from_extracted(user)
     if not materials_full.strip():
@@ -177,10 +214,70 @@ def run_step2(user: str, *, stream: bool = True) -> None:
             with open(progress_path, "r", encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f if ln.strip()]
             if lines:
-                last_line = lines[-1]
-                if "\t" in last_line:
-                    _, last_written = last_line.split("\t", 1)
+                for ln in reversed(lines):
+                    if "\t" not in ln:
+                        continue
+                    kind, title = ln.split("\t", 1)
+                    if kind == "section":
+                        last_written = title.strip()
+                        break
+                if last_written:
                     print(f"[第二步] 上次已写至：「{last_written}」")
+
+    expected_order_norm, expected_norm_to_raw = get_expected_section_order()
+
+    # 依据 chapters+progress，判断是否存在“后写了更后面的内容，导致顺序错乱”
+    written_sections, _ = get_written_set(progress_path)
+    written_norm = {normalize_title_for_compare(t) for t in written_sections if t}
+    missing_norm = [n for n in expected_order_norm if n not in written_norm]
+
+    # 自动修复（截断错误/多余部分）：把从“最早的错乱后置标题”开始的 docx + progress 截断，
+    # 让后续补写时不会继续追加到错误位置。
+    if (
+        auto_repair
+        and docx_path.exists()
+        and progress_path.exists()
+        and missing_norm
+    ):
+        first_missing_idx = expected_order_norm.index(missing_norm[0])
+        expected_idx_map = {n: i for i, n in enumerate(expected_order_norm)}
+        # written_norm 可能包含模板外的标题（例如正文里额外写入的层级/表述），
+        # 这时不能直接用 expected_order_norm.index(n) 否则会抛 ValueError。
+        out_of_order_written = [
+            n
+            for n in written_norm
+            if n in expected_idx_map and expected_idx_map[n] > first_missing_idx
+        ]
+        if out_of_order_written:
+            truncate_idx = min(expected_idx_map[n] for n in out_of_order_written)
+            truncate_norm = expected_order_norm[truncate_idx]
+            truncate_title_actual = next(
+                (t for t in written_sections if normalize_title_for_compare(t) == truncate_norm),
+                None,
+            )
+            if truncate_title_actual:
+                bak_docx = docx_path.with_suffix(docx_path.suffix + ".bak")
+                bak_progress = progress_path.with_suffix(progress_path.suffix + ".bak")
+                if not bak_docx.exists():
+                    shutil.copy2(docx_path, bak_docx)
+                if not bak_progress.exists():
+                    shutil.copy2(progress_path, bak_progress)
+
+                ok1 = truncate_docx_from_heading(docx_path, truncate_title_actual)
+                ok2 = truncate_progress_from_section(progress_path, truncate_title_actual)
+                if ok1 and ok2:
+                    print(
+                        f"[自动修复] 检测到顺序错乱，已截断：从《{truncate_title_actual}》开始。已备份到 {bak_docx.name} / {bak_progress.name}。"
+                    )
+                    existing_docx_text = read_docx_to_text(docx_path)
+                    last_written = None
+                    written_sections, _ = get_written_set(progress_path)
+                    written_norm = {normalize_title_for_compare(t) for t in written_sections if t}
+                    missing_norm = [n for n in expected_order_norm if n not in written_norm]
+
+    # missing_titles 的计算不再放在 main.py：由 PlanAgent 根据 template/chapters + progress.txt 自己生成
+
+    plan_agent = PlanAgent(max_items_per_round=1)
 
     agent = build_agent(
         user=user,
@@ -190,51 +287,64 @@ def run_step2(user: str, *, stream: bool = True) -> None:
         streaming=stream,
     )
 
-    def normalize_title(s: str) -> str:
-        s = (s or "").strip()
-        s = re.split(r"[（(]", s, maxsplit=1)[0].strip()
-        s = re.sub(r"\s+", " ", s)
-        return s
-
-    expected_order_norm, expected_norm_to_raw = get_expected_section_order()
-
-    def compute_missing() -> list[str]:
-        written_sections, _ = get_written_set(progress_path)
-        written_norm = {normalize_title(t) for t in written_sections if t}
-        missing_norm = [n for n in expected_order_norm if n not in written_norm]
-        return [expected_norm_to_raw[n] for n in missing_norm]
-
     cfg = {"recursion_limit": 150}
     print("[第二步] 正在生成论文（LangChain Agent + RAG，自动续写模式）…")
 
     max_rounds = 10  # 避免无限循环；写到后面一般 2~4 轮足够
     last_missing: list[str] = []
+    plan_log_path = OUTPUT_DIR / f"{user}.plan.txt"
     for round_idx in range(1, max_rounds + 1):
         # 动态读取进度文件，便于多轮续写
         if progress_path.exists():
             with open(progress_path, "r", encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f if ln.strip()]
             if lines:
-                last_line = lines[-1]
-                if "\t" in last_line:
-                    _, last_written = last_line.split("\t", 1)
-                    last_written = last_written.strip()
+                for ln in reversed(lines):
+                    if "\t" not in ln:
+                        continue
+                    kind, title = ln.split("\t", 1)
+                    if kind == "section":
+                        last_written = title.strip()
+                        break
 
-        missing_titles = compute_missing()
+        plan_steps, missing_titles = plan_agent.plan_for_user(progress_path)
         if not missing_titles:
             print(f"[第二步] 期望标题已全部写完（第 {round_idx} 轮）。")
             break
 
-        # 仍缺少章节时，继续让 agent 写“下一缺失章节”
+        # 仍缺少章节时，使用 PlanAgent 制定本轮“下一缺失标题”（并只允许写这个）
         last_missing = missing_titles
-        target = missing_titles[0]
-        print(f"\n[第二步] 第 {round_idx} 轮：仍缺少标题：{', '.join(missing_titles[:6])}"+("…" if len(missing_titles) > 6 else ""))
+        if not plan_steps:
+            print(f"[PlanAgent] 第 {round_idx} 轮未给出可执行 steps，提前结束。")
+            break
+        target = plan_steps[0].title
+        plan_text = "\n".join([f"- {s.title}（{s.reason}）" for s in plan_steps])
+        print(
+            f"\n[第二步] 第 {round_idx} 轮：仍缺少标题：{', '.join(missing_titles[:6])}"
+            + ("…" if len(missing_titles) > 6 else "")
+        )
+        plan_block = _format_plan_block(
+            round_idx=round_idx,
+            max_rounds=max_rounds,
+            last_written=last_written,
+            missing_titles=missing_titles,
+            plan_steps=plan_steps,
+        )
+        print(plan_block)
+        with open(plan_log_path, "a", encoding="utf-8") as f:
+            f.write(plan_block + "\n")
 
         if existing_docx_text:
             user_message = (
                 f'【续写】当前文档已存在，请从进度接着写，不要重写已有章节。'
                 f'请先补全下一缺失标题：{target}。'
+                f'本轮只允许写入这个标题：{target}；其他标题禁止写入。'
                 f'在写入该缺失标题之前，不要写入更后面的任何标题。'
+                f'\n【写前自检（每次写入前必须执行）】'
+                f'\n1) 你当前写入的标题必须等于：{target}'
+                f'\n2) 先判断写入类型：正文=write_section_to_docx；表格=write_table_to_docx；图题=write_figure_caption_to_docx'
+                f'\n3) 再检查样式要求：标题层级/段落/图题居中/表格三线表。'
+                f'\n\n【本轮计划（不可跳过）】\n{plan_text}\n'
                 f'validate_docx 路径："{docx_path_abs}"。'
             )
             if last_written:
@@ -246,7 +356,13 @@ def run_step2(user: str, *, stream: bool = True) -> None:
             user_message = (
                 f'【从头开始】请按论文结构模板从摘要开始撰写。'
                 f'请先补全下一缺失标题：{target}。'
+                f'本轮只允许写入这个标题：{target}；其他标题禁止写入。'
                 f'在写入该缺失标题之前，不要写入更后面的任何标题。'
+                f'\n【写前自检（每次写入前必须执行）】'
+                f'\n1) 你当前写入的标题必须等于：{target}'
+                f'\n2) 先判断写入类型：正文=write_section_to_docx；表格=write_table_to_docx；图题=write_figure_caption_to_docx'
+                f'\n3) 再检查样式要求：标题层级/段落/图题居中/表格三线表。'
+                f'\n\n【本轮计划（不可跳过）】\n{plan_text}\n'
                 f'validate_docx 路径："{docx_path_abs}"。'
             )
 
@@ -290,6 +406,11 @@ def main() -> None:
         action="store_true",
         help="关闭流式输出（整段返回后再显示，适合脚本日志）",
     )
+    parser.add_argument(
+        "--no-auto-repair",
+        action="store_true",
+        help="关闭自动截断修复乱序追加（会破坏文档顺序时使用）。",
+    )
     args = parser.parse_args()
 
     if args.list_profiles:
@@ -316,7 +437,7 @@ def main() -> None:
     print(f"[配置] 学生：{user}")
 
     if run_step1(user):
-        run_step2(user, stream=not args.no_stream)
+        run_step2(user, stream=not args.no_stream, auto_repair=not args.no_auto_repair)
 
 
 if __name__ == "__main__":

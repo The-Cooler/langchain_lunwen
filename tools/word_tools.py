@@ -136,3 +136,73 @@ def write_figure_caption_into_docx(
         append_progress(progress_path, "figure_caption", cap)
     return f"已写入图题：{cap[:30]}… 到 {docx_path}。"
 
+
+def truncate_docx_from_heading(docx_path: str | Path, heading_title: str) -> bool:
+    """
+    截断 docx：删除从 `heading_title` 对应的段落开始（包含该段落）到文档末尾的所有内容。
+
+    返回值：是否成功找到并截断。
+    """
+    from docx import Document
+
+    p = Path(docx_path)
+    if not p.exists():
+        return False
+
+    doc = Document(str(p))
+    target_title = (heading_title or "").strip()
+    if not target_title:
+        return False
+
+    target_el = None
+    for para in doc.paragraphs:
+        if (para.text or "").strip() == target_title:
+            target_el = para._element
+            break
+    if target_el is None:
+        return False
+
+    body = doc.element.body
+    children = list(body)
+    deleting = False
+    for child in children:
+        if child is target_el:
+            deleting = True
+        if deleting:
+            body.remove(child)
+
+    doc.save(str(p))
+    return True
+
+
+def truncate_progress_from_section(progress_path: str | Path, section_title: str) -> bool:
+    """
+    截断 progress.txt：删除从首次出现 `section_title`（kind == section）开始（包含该行）到末尾的所有记录。
+    """
+    pp = Path(progress_path)
+    if not pp.exists():
+        return False
+
+    target = (section_title or "").strip()
+    if not target:
+        return False
+
+    lines = pp.read_text(encoding="utf-8").splitlines()
+    kept: list[str] = []
+    found = False
+    for ln in lines:
+        if not ln.strip() or "\t" not in ln:
+            continue
+        kind, title = ln.split("\t", 1)
+        title = title.strip()
+        if not found and kind == "section" and title == target:
+            found = True
+            break
+        kept.append(ln.strip())
+
+    if not found:
+        return False
+
+    pp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    return True
+
