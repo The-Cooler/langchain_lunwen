@@ -1,11 +1,13 @@
 """LangChain LLM 配置：DeepSeek / OpenAI 兼容接口。"""
 import os
+from dotenv import load_dotenv
 
+load_dotenv()
 from langchain_openai import ChatOpenAI
 
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
-MODEL_KEY = os.getenv("DEEPSEEK_KEY")
+DEFAULT_BASE_URL = os.getenv("BASE_URL")
+DEFAULT_MODEL = os.getenv("MODEL")
+MODEL_KEY = os.getenv("API_KEY")
 
 
 def get_llm(
