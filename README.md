@@ -13,7 +13,7 @@
    会进入交互式选择模板包（`--profile`）和学生（`--user`），然后生成 `output/{user}.docx`。
 
 可用参数：
-- `uv run main.py`： 直接运行，在cli选择模板和user
+- `uv run main.py`： 直接运行，在cli选择模板和user（推荐使用此方法运行）
 - `uv run main.py --list-profiles`：列出 `config/` 下可用模板包
 - `uv run main.py --profile 软件学院 --user 张三`：直接指定模板包和学生
 - `uv run main.py --no-stream`：关闭终端流式输出（整段输出更适合写日志）
