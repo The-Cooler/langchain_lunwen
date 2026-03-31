@@ -39,15 +39,20 @@ def ensure_word_builder(
 
 
 def _section_heading_level(section_title: str) -> int:
-    """章(第x章)→0 三号，节(x.1)→1 小三，小节(x.1.1)→2 四号。"""
+    """与论文规范一致：章→Heading 1，节→Heading 2，小节→Heading 3。
+
+    注意：python-docx 的 add_heading(level=0) 会套用「标题/Title」样式，不是一级标题；
+    因此章必须用 level=1 才对应 Word 的「标题 1」。
+    """
     s = section_title.strip()
     if s.startswith("第") and "章" in s:
-        return 0
-    if re.match(r"^\d+\.\d+\.\d+", s):
-        return 2
-    if re.match(r"^\d+\.\d+", s):
         return 1
-    return 0
+    if re.match(r"^\d+\.\d+\.\d+", s):
+        return 3
+    if re.match(r"^\d+\.\d+", s):
+        return 2
+    # 摘要、关键词、致谢等：按一级标题处理
+    return 1
 
 
 def write_section_into_docx(

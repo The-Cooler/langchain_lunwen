@@ -200,7 +200,7 @@ class WordBuilder:
     def add_heading(
         self,
         text: str,
-        level: int = 0,
+        level: int = 1,
         *,
         font_name_cn: str | None = None,
         font_name_en: str | None = FONT_TIMES_NEW_ROMAN,
@@ -208,7 +208,8 @@ class WordBuilder:
         alignment: int | None = None,
     ) -> "WordBuilder":
         """
-        添加标题。level=0 为章（默认居中），1 为节、2 为小节（默认顶格左对齐）。
+        添加标题。语义与 Word「标题 1/2/3」一致：level=1 章（默认居中），2 节、3 小节（默认顶格）。
+        勿使用 level=0：python-docx 会套用文档「标题/Title」样式，不是一级标题。
         传 alignment 可覆盖默认。
         """
         style = self._document.styles['Title']
@@ -219,12 +220,12 @@ class WordBuilder:
         
         p = self._document.add_heading(text, level)
         # p.style = "Normal"
-        # 未传字号时按 level：章 三号 16pt / 节 小三 15pt / 小节 四号 14pt
+        # 未传字号时按 level：章(Heading1) 三号 16pt / 节 15pt / 小节 14pt
         if font_size_pt is None:
-            font_size_pt = {0: FONT_SIZE_16, 1: FONT_SIZE_15, 2: FONT_SIZE_14}.get(level, FONT_SIZE_12)
+            font_size_pt = {1: FONT_SIZE_16, 2: FONT_SIZE_15, 3: FONT_SIZE_14}.get(level, FONT_SIZE_12)
         # 未传对齐时：章居中，节/小节顶格（左对齐）
         if alignment is None:
-            alignment = WD_ALIGN_PARAGRAPH.CENTER if level == 0 else WD_ALIGN_PARAGRAPH.LEFT
+            alignment = WD_ALIGN_PARAGRAPH.CENTER if level == 1 else WD_ALIGN_PARAGRAPH.LEFT
         for run in p.runs:
             run.bold = False
             _set_run_font(
