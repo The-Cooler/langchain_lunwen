@@ -9,7 +9,7 @@ from typing import List, Tuple
 from pydantic import BaseModel
 
 from core.context import get_config_profile_name
-from core.llm import get_llm
+from core.llm import get_plan_llm
 from tools.plan_tools import compute_missing_titles
 
 
@@ -44,7 +44,7 @@ class PlanAgent:
     def __init__(self, max_items_per_round: int = 1) -> None:
         self.max_items_per_round = max_items_per_round
 
-        self._llm = get_llm(streaming=False)
+        self._llm = get_plan_llm(streaming=False)
 
         # 关键点：你当前后端会拒绝 response_format/json_schema 类型，
         # 所以这里强制使用 function_calling 方式的 structured output，

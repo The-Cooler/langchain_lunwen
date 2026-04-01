@@ -1,8 +1,10 @@
 """
-论文编写上下文：多份 Word 提取结果、模板、system_prompt、SKILL。
-配置按「模板包」子目录划分：config/{profile}/ 下含 template.md、system_prompt.md、skill/、chapters/。
-流程：从 data/input 多份 Word 提取数据 → 根据所选 profile 的模板 + 提取结果 + system_prompt + skill 做论文。
+论文编写上下文：多份 Word 提取结果、模板、system_prompt、skills。
+配置按「模板包」子目录划分：config/{profile}/ 下含 template.md、system_prompt.md、skills/、chapters/。
+流程：从 data/input 多份 Word 提取数据 → 根据所选 profile 的模板 + 提取结果 + system_prompt + skills 做论文。
 """
+import platform
+import sys
 from pathlib import Path
 
 from core.extract_docx import EXTRACTED_DIR, INPUT_DOCX_DIR, list_input_docx, run_extract
@@ -41,7 +43,7 @@ def _default_profile_name() -> str:
 def set_config_profile(name: str) -> None:
     """
     设置当前论文配置模板包（config 下的子目录名）。
-    要求：存在 template.md、system_prompt.md、skill/论文助手.md、chapters/ 目录。
+    要求：存在 template.md、system_prompt.md、skills/、chapters/ 目录。
     """
     global _active_profile
     d = _DIR_CONFIG / name
@@ -51,9 +53,9 @@ def set_config_profile(name: str) -> None:
         raise FileNotFoundError(f"缺少 template.md：{d}")
     if not (d / "system_prompt.md").is_file():
         raise FileNotFoundError(f"缺少 system_prompt.md：{d}")
-    skill_dir = d / "skill"
-    if not skill_dir.is_dir() or not (skill_dir / "论文助手.md").is_file():
-        raise FileNotFoundError(f"缺少 skill/论文助手.md：{d}")
+    skills_dir = d / "skills"
+    if not skills_dir.is_dir():
+        raise FileNotFoundError(f"缺少 skills 目录：{d}")
     chapters = d / "chapters"
     if not chapters.is_dir():
         raise FileNotFoundError(f"缺少 chapters 目录：{d}")
@@ -77,6 +79,68 @@ def get_project_root() -> Path:
     return _ROOT
 
 
+def format_agent_runtime_context(
+    profile: str,
+    *,
+    user: str | None = None,
+    docx_path: Path | None = None,
+    max_paths: int = 300,
+) -> str:
+    """供 Agent 系统提示词使用：当前 OS、项目根、输出 Word，以及虚拟路径下的配置/素材文件清单。"""
+    root = _ROOT.resolve()
+    lines: list[str] = [
+        f"- **操作系统**：{platform.system()} {platform.release()}（`{sys.platform}`）",
+        f"- **Python**：{sys.version.split()[0]}",
+        f"- **项目根（真实路径）**：`{root}`",
+        "- **虚拟文件系统**：工具中的路径以 **`/`** 开头，根即项目根；**不要**使用盘符路径（如 `E:\\…`、`/e/Desktop/…`）。",
+    ]
+    if docx_path is not None:
+        rp = docx_path.resolve()
+        lines.append(f"- **当前输出 Word（真实路径）**：`{rp}`")
+        try:
+            rel = rp.relative_to(root)
+            lines.append(f"- **当前输出 Word（虚拟路径）**：`/{rel.as_posix()}`")
+        except ValueError:
+            lines.append("- **当前输出 Word**：不在项目根下，无虚拟路径。")
+
+    paths: list[str] = []
+    prof_dir = root / "config" / profile
+    if prof_dir.is_dir():
+        for p in sorted(prof_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in {".md", ".txt"}:
+                continue
+            try:
+                rel = p.relative_to(root)
+                paths.append(f"/{rel.as_posix()}")
+            except ValueError:
+                pass
+
+    if user:
+        ext_dir = (EXTRACTED_DIR / user).resolve()
+        if ext_dir.is_dir():
+            for p in sorted(ext_dir.iterdir()):
+                if not p.is_file():
+                    continue
+                if p.suffix.lower() not in {".md", ".sql"}:
+                    continue
+                try:
+                    rel = p.relative_to(root)
+                    paths.append(f"/{rel.as_posix()}")
+                except ValueError:
+                    pass
+
+    paths = sorted(set(paths))
+    total = len(paths)
+    shown = paths[:max_paths]
+    body = "\n".join(f"  - `{p}`" for p in shown) if shown else "  - （无）"
+    if total > max_paths:
+        body += f"\n  - …（共 {total} 条，仅列出前 {max_paths} 条）"
+
+    return "\n".join(lines) + "\n\n**与本会话相关的配置文件与素材（虚拟路径索引）**：\n" + body
+
+
 def get_input_docx_dir() -> Path:
     """放多份 Word 的目录。"""
     return INPUT_DOCX_DIR
@@ -96,11 +160,12 @@ def get_system_prompt_path() -> Path:
 
 
 def get_skill_dir() -> Path:
-    return get_config_profile_dir() / "skill"
+    # 兼容旧接口名：返回「格式规则文件目录」。
+    return get_config_profile_dir() / "skills" / "format-rules" / "files"
 
 
 def get_skill_path() -> Path:
-    return get_skill_dir() / "论文助手.md"
+    return get_config_profile_dir() / "skills" / "format-rules" / "SKILL.md"
 
 
 def get_skill_index_path() -> Path:
@@ -123,13 +188,35 @@ def _chapter_title_to_basename(section_title: str) -> str:
     return s or "未命名"
 
 
+def _spec_basename_candidates(section_title: str) -> list[str]:
+    """生成可能的规范 md 基名（不含扩展名），按尝试顺序：先完整标题，再逐层去掉括号内说明（如「摘要 (Abstract)」→「摘要」）。"""
+    import re
+
+    bases: list[str] = []
+    seen: set[str] = set()
+    t = section_title.strip()
+    while t:
+        b = _chapter_title_to_basename(t)
+        if b and b not in seen:
+            seen.add(b)
+            bases.append(b)
+        t2 = re.sub(r"\s*[\(（][^)）]+[)）]\s*", "", t).strip()
+        if t2 == t:
+            break
+        t = t2
+    return bases
+
+
 def get_chapter_spec_path(section_title: str) -> Path | None:
     """根据章节标题返回对应规范 md 路径；无则返回 None。"""
     if not section_title or not section_title.strip():
         return None
-    name = _chapter_title_to_basename(section_title)
-    path = get_chapters_spec_dir() / f"{name}.md"
-    return path if path.exists() else None
+    spec_dir = get_chapters_spec_dir()
+    for name in _spec_basename_candidates(section_title):
+        path = spec_dir / f"{name}.md"
+        if path.exists():
+            return path
+    return None
 
 
 def load_template_content() -> str:
@@ -144,7 +231,7 @@ def load_skill_content(include_index: bool = True) -> str:
     text = get_skill_path().read_text(encoding="utf-8")
     if include_index and get_skill_index_path().exists():
         prof = get_config_profile_name()
-        text += f"\n\n---\n按需查阅格式要求分章：config/{prof}/skill/论文要求-索引.md"
+        text += f"\n\n---\n按需查阅格式要求分章：config/{prof}/skills/format-rules/files/论文要求-索引.md"
     return text
 
 
@@ -159,7 +246,7 @@ SKILL_CHAPTER_NAMES = [
 
 
 def load_skill_full_content() -> str:
-    """加载 论文助手.md + 全部论文要求分章内容，供 system 注入（不再只读索引）。"""
+    """加载 format-rules/SKILL.md + 全部论文要求分章内容，供 system 注入。"""
     parts = [get_skill_path().read_text(encoding="utf-8")]
     skill_dir = get_skill_dir()
     for name in SKILL_CHAPTER_NAMES:
@@ -225,13 +312,13 @@ def sync_md_sql_to_extracted(user: str) -> list[Path]:
 
 
 def get_writing_flow_instructions(user: str) -> str:
-    """返回给 AI 的论文编写流程：基于多份 Word 提取结果 + 模板 + prompt + skill。"""
+    """返回给 AI 的论文编写流程：基于多份 Word 提取结果 + 模板 + prompt + skills。"""
     prof = get_config_profile_name()
     return f"""# 论文编写流程（AI 按此执行）
 
 1. **数据来源**：多份 Word 已提取到 `data/extracted/{user}`，每份 docx 对应一个 .md。按需读取这些 .md 作为写作素材。
 2. **读取 system_prompt**：`config/{prof}/system_prompt.md` — 遵守用户总指示。
-3. **读取 SKILL**：`config/{prof}/skill/论文助手.md`（及按需 `config/{prof}/skill/论文要求-*.md`）— 满足格式与字数要求。
+3. **读取 SKILL**：`config/{prof}/skills/*/SKILL.md`（及按需 `config/{prof}/skills/format-rules/files/论文要求-*.md`）— 满足格式与字数要求。
 4. **读取模板**：`config/{prof}/template.md` — 按此结构组织章节。
 5. **根据模板 + 提取数据撰写**：用 data/extracted/{user} 中的内容填充各章，符合格式与字数；可用 `word_agent` 生成或润色 Word 文档。
 """

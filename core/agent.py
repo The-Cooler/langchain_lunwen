@@ -1,42 +1,51 @@
-"""LangChain Agent：使用 langgraph 的 create_react_agent 构建论文生成 Agent。
-
-替代原 core/react_agent.py 中的手写 ReAct 循环，
-改用 langgraph.prebuilt.create_react_agent（自带 tool_calling 支持）。
-"""
+"""LangChain Agent：使用 deepagents 的 create_deep_agent 构建论文生成 Agent（支持 Skills）。"""
 from pathlib import Path
 
-from langgraph.prebuilt import create_react_agent
+from deepagents import create_deep_agent
+from deepagents.backends.filesystem import FilesystemBackend
 
 from core.context import (
+    format_agent_runtime_context,
     get_config_profile_name,
     load_system_prompt_content,
     load_template_content,
 )
-from core.llm import get_llm
+from core.llm import get_writer_llm
 from core.rag import get_or_build_vectorstore
 from tools.langchain_tools import ThesisContext, create_thesis_tools
 
 
-def _build_system_message() -> str:
-    """构建系统提示词。只放基本角色、模板结构和写作规则；素材和格式要求均由工具按需读取。"""
+def _build_system_message(
+    *,
+    user: str | None = None,
+    docx_path: Path | None = None,
+) -> str:
+    """构建系统提示词。只放基本角色、模板结构和写作规则。"""
     prof = get_config_profile_name()
     system_prompt = load_system_prompt_content()
     template = load_template_content()
+    runtime = format_agent_runtime_context(prof, user=user, docx_path=docx_path)
 
     print("===== 已加载提示词 =====")
     print(f"  · 模板包: config/{prof}/")
     print(f"  · system_prompt: {len(system_prompt)} 字")
     print(f"  · template: {len(template)} 字")
-    print("  · skill/chapters: 由工具按需读取")
+    print("  · skills/chapters: 由 deepagents skills + 工具按需读取")
 
     return f"""你是一个专业的毕业论文撰写助手。你将根据素材、论文结构模板和格式要求，逐章撰写完整论文并写入 Word 文档。
 
 **当前论文配置模板包：{prof}**（config/{prof}/）
 
+## 当前运行环境与相关文件（虚拟路径索引）
+
+{runtime}
+
+下文「用户总指示」「论文结构模板」已从磁盘加载并注入；**无需**再用 `read_file` 重复读取 `system_prompt.md`、`template.md`，除非用户明确要求核对原文。
+
 ## 写作流程（严格遵守，每章都要执行）
 
 1. **读取章节规范**：调用 `read_chapter_spec` 读取该章的内容要求与结构细则。
-2. **读取格式要求**：调用 `read_format_spec` 读取相关格式规范（如字体字号、段落排版等），首次写入前至少读取一次。
+2. **读取格式要求**：优先通过已加载的 deepagent skills（`format-rules`）按需读取格式规则文件，不再走固定工具路由。
 3. **搜索素材（控制频率）**：在进入“某一章”时调用 `search_materials` 做 **1 次** 面向整章的检索并做笔记（不要为每个小节反复检索）。
    只有当你发现“缺少关键信息/证据/术语定义/模块细节”时，才允许对该缺口再做 **补充检索**。
 4. **逐节写入**：根据素材和规范，调用 `write_section_to_docx` 将标题和正文写入 Word。
@@ -44,14 +53,6 @@ def _build_system_message() -> str:
 6. **插入图题**：需要图片题注时，调用 `write_figure_caption_to_docx`。
 7. **验证文档**：全部章节写完后，调用 `validate_docx` 验证，通过后才能结束。
 8. **顺序执行**：按模板顺序从摘要开始，逐节写入。不要跳章、不要重复已写章节。
-
-## 可用的格式规范类别（通过 read_format_spec 读取）
-
-- `论文助手`：总体写作指引
-- `页面设置`：页边距、装订线、页眉
-- `字体与字号`：封面、摘要、目录、正文标题与内容、图表字体
-- `段落与排版`：行距、缩进、段前段后、标点、表格/图/列表规则
-- `其他要求`：关键词数量、用例与模块数量、图表编号
 
 ## 写作规则
 
@@ -77,7 +78,7 @@ def _build_system_message() -> str:
 
 {template}
 
-（素材通过 search_materials 按需检索；格式要求通过 read_format_spec 按需读取；章节规范通过 read_chapter_spec 按需读取。不要跳过这些步骤。）"""
+（素材通过 search_materials 按需检索；格式要求通过 skills 按需读取；章节规范通过 read_chapter_spec 按需读取。不要跳过这些步骤。）"""
 
 
 def build_agent(
@@ -88,12 +89,12 @@ def build_agent(
     *,
     streaming: bool = True,
 ):
-    """构建论文生成 LangChain Agent（基于 langgraph）。
+    """构建论文生成 LangChain Agent（基于 deepagents）。
 
     流程：
     1. 将素材构建/加载为 RAG 向量库
     2. 创建共享状态与 LangChain 工具
-    3. 使用 langgraph 的 create_react_agent 组装 Agent
+    3. 使用 deepagents 的 create_deep_agent 组装 Agent（加载 skills）
     """
     print("[Agent] 构建/加载 RAG 向量库...")
     vectorstore = get_or_build_vectorstore(materials_text, user)
@@ -105,12 +106,24 @@ def build_agent(
     )
     tools = create_thesis_tools(ctx)
 
-    llm = get_llm(streaming=streaming)
-    system_message = _build_system_message()
+    llm = get_writer_llm(streaming=streaming)
+    system_message = _build_system_message(user=user, docx_path=docx_path)
+    project_root = Path(__file__).resolve().parent.parent
+    prof = get_config_profile_name()
+    skill_source = f"/config/{prof}/skills/"
+    skill_dir = project_root / "config" / prof / "skills"
+    skills = [skill_source] if skill_dir.exists() else None
+    if skills:
+        print(f"[Agent] 已启用 Skills：{skill_source}")
+    else:
+        print(f"[Agent] 未找到 Skills 目录，跳过加载：{skill_source}")
 
-    agent = create_react_agent(
+    agent = create_deep_agent(
         model=llm,
         tools=tools,
-        prompt=system_message,
+        system_prompt=system_message,
+        backend=FilesystemBackend(root_dir=str(project_root), virtual_mode=True),
+        skills=skills,
+        # temperature=0.3,
     )
     return agent

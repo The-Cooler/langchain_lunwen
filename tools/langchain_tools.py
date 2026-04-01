@@ -11,10 +11,8 @@ from langchain_core.tools import tool
 from core.context import (
     get_chapter_spec_path,
     get_config_profile_name,
-    get_skill_dir,
     load_template_content,
 )
-from tools.chapter_spec_tools import debug_chapter_spec
 from tools.terminal_tools import run_terminal_command_with_confirm
 from tools.thesis_tools import (
     get_progress_path,
@@ -28,15 +26,6 @@ from tools.word_tools import (
     write_section_into_docx,
     write_table_into_docx,
 )
-
-_FORMAT_SPEC_MAP = {
-    "论文助手": "论文助手.md",
-    "索引": "论文要求-索引.md",
-    "页面设置": "论文要求-页面设置.md",
-    "字体与字号": "论文要求-字体与字号.md",
-    "段落与排版": "论文要求-段落与排版.md",
-    "其他要求": "论文要求-其他要求.md",
-}
 
 _PARENS_SPLIT_RE = re.compile(r"[（(]")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -221,29 +210,13 @@ def create_thesis_tools(ctx: ThesisContext) -> list:
         return out
 
     @tool
-    def read_format_spec(category: str) -> str:
-        """按需读取论文格式规范。参数 category: 规范类别，可选值为「论文助手」「页面设置」「字体与字号」「段落与排版」「其他要求」「索引」。撰写前至少读取一次相关类别。"""
-        filename = _FORMAT_SPEC_MAP.get(category)
-        if not filename:
-            return f"未知类别「{category}」。可选：{', '.join(_FORMAT_SPEC_MAP.keys())}"
-        path = get_skill_dir() / filename
-        if not path.exists():
-            return f"规范文件不存在：{path}"
-        return path.read_text(encoding="utf-8")
-
-    @tool
     def read_chapter_spec(section_title: str) -> str:
         """读取某章的内容要求与结构细则。撰写或修改该章前先调用本工具。参数 section_title: 章节标题，如「摘要」「第1章 绪论」「致谢」。"""
         return read_chapter_spec_impl(section_title)
 
     @tool
-    def debug_chapter_spec_tool(section_title: str) -> str:
-        """调试用：当 read_chapter_spec 找不到规范文件时，调用本工具查看映射与已有规范文件情况。"""
-        return debug_chapter_spec(section_title)
-
-    @tool
     def run_terminal_command(command: str) -> str:
-        """执行终端命令（执行前需人工确认），用于排查规范文件等问题。"""
+        """执行终端命令（执行前需人工确认）。"""
         return run_terminal_command_with_confirm(command)
 
     @tool
@@ -361,9 +334,7 @@ def create_thesis_tools(ctx: ThesisContext) -> list:
 
     return [
         search_materials,
-        read_format_spec,
         read_chapter_spec,
-        debug_chapter_spec_tool,
         run_terminal_command,
         write_section_to_docx,
         write_table_to_docx,
