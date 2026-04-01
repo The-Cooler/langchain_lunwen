@@ -221,7 +221,7 @@ def create_thesis_tools(ctx: ThesisContext) -> list:
 
     @tool
     def write_section_to_docx(section_title: str, content: str) -> str:
-        """将一节正式内容写入 Word 文档。section_title 为标题，content 为纯正文（可多段，用换行分隔）。严禁在 content 中写入思考过程或元内容，仅限论文正文。"""
+        """将一节正式内容写入 Word 文档。section_title 为标题；若某段按模板不需要单独小节标题（仅正文），可传空字符串，则只写入正文段落、不出现「未命名节」。content 为纯正文（可多段，用换行分隔）。"""
         st = section_title.strip()
         if st == "参考文献" or st.startswith("参考文献 "):
             return "未写入：禁止自动生成「参考文献」章节及文献列表，请跳过。"
@@ -271,7 +271,8 @@ def create_thesis_tools(ctx: ThesisContext) -> list:
             content,
             progress_path=progress_path,
         )
-        return result + f"\n（当前已写至：{st[:60]}；请按模板写下一节，勿重复已写章节。）"
+        tail = st[:60] if st else "（无节标题正文）"
+        return result + f"\n（当前已写至：{tail}；请按模板写下一节，勿重复已写章节。）"
 
     @tool
     def write_table_to_docx(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -19,6 +20,21 @@ from core.extract_docx import read_docx_to_text
 
 MATERIAL_INPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "input"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
+
+# LangGraph 单轮 invoke/stream 的递归上限：deep agent 每轮可能多次 model↔工具↔中间件，步数累加很快。
+# 需求分析一章若含多张表，150 往往不够。可通过环境变量 AGENT_RECURSION_LIMIT 调整。
+_DEFAULT_AGENT_RECURSION = 400
+
+
+def _agent_recursion_limit() -> int:
+    raw = os.getenv("AGENT_RECURSION_LIMIT", "").strip()
+    if not raw:
+        return _DEFAULT_AGENT_RECURSION
+    try:
+        n = int(raw)
+    except ValueError:
+        return _DEFAULT_AGENT_RECURSION
+    return max(50, min(n, 5000))
 
 
 def run_step1(user: str) -> bool:
@@ -120,8 +136,10 @@ def run_step2(user: str, *, stream: bool = True, auto_repair: bool = True) -> No
                     last_written = None
 
     plan_agent = PlanAgent(max_items_per_round=1)
-    cfg = {"recursion_limit": 150}
+    _rlim = _agent_recursion_limit()
+    cfg = {"recursion_limit": _rlim}
     print("[第二步] 正在生成论文（LangChain Agent + RAG，自动续写模式）…")
+    print(f"[第二步] LangGraph recursion_limit={_rlim}（可用环境变量 AGENT_RECURSION_LIMIT 调整）")
 
     max_rounds = 10
     last_missing: list[str] = []

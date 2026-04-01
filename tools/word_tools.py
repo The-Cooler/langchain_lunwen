@@ -67,17 +67,25 @@ def write_section_into_docx(
     严禁在 content 中写入思考、<thought> 等，仅限论文正文。
     """
     content = strip_thinking_from_content(content)
-    if not section_title.strip() and not content:
+    title = (section_title or "").strip()
+    if not title and not content:
+        return "标题与内容为空，未写入。"
+    # 仅有正文、无标题：按规范写入段落，不生成「未命名节」占位标题（常见于 3.2.x 下 (1)(2) 实体/表说明）
+    if not title:
+        if content:
+            builder.add_paragraph(content.strip())
+            builder.save(docx_path)
+            return f"已写入正文（无小节标题），并保存到 {docx_path}。"
         return "标题与内容为空，未写入。"
     level = _section_heading_level(section_title)
-    builder.add_heading(section_title.strip() or "未命名节", level=level)
+    builder.add_heading(title, level=level)
     if content:
         # 正文统一交给 add_paragraph：内部将任意 \n 拆成多个真正段落，禁止段内软回车
         builder.add_paragraph(content.strip())
     builder.save(docx_path)
     if progress_path is not None:
-        append_progress(progress_path, "section", section_title.strip())
-    return f"已写入：{section_title[:30]}…，并保存到 {docx_path}。"
+        append_progress(progress_path, "section", title)
+    return f"已写入：{title[:30]}…，并保存到 {docx_path}。"
 
 
 def write_table_into_docx(
